@@ -1,0 +1,445 @@
+
+        const float HORIZONTAL_STEP = 5f;
+        const float VERTICAL_STEP = 0.8f;
+        const float HINGE_SPEED = 0.7f;
+        const float PISTON_SPEED = 0.4f;
+        const float LEFT_BORDER = -89f / 57.2958f;
+        const float RIGHT_BORDER = 89f / 57.2958f;
+        
+        
+        const float PI = 3.1415926f;
+
+        float maxCapacity = 0f;
+        float currentCapacity = 0f;
+        float currentVerticalLimit = 0f;
+        float currentHorizontalLimit = 0f;
+        float maxHorizontalLimit = 0f;
+        float maxVerticalLimit = 0f;
+        string debug = "";
+
+        bool forwardDrilling = true;
+
+        List<IMyCargoContainer> containers;
+        List<IMyShipDrill> drills;
+        List<IMyExtendedPistonBase> verticalPistons;
+        List<IMyExtendedPistonBase> horizontalPistons;
+        IMyMotorAdvancedStator hinge;
+        IMyTextSurface surface;
+
+        bool enabled = true;
+
+        public enum Directions
+        {
+            left,
+            right,
+            up,
+            down,
+            forward,
+            backward
+        }
+        Directions direction;
+
+        public Program()
+        {
+            Init();
+            Load();
+        }
+
+        public void Init()
+        {
+            containers = new List<IMyCargoContainer>();
+            drills = new List<IMyShipDrill>();
+            verticalPistons = new List<IMyExtendedPistonBase>();
+            horizontalPistons = new List<IMyExtendedPistonBase>();
+            maxHorizontalLimit = 0f;
+            maxVerticalLimit = 0f;
+            currentVerticalLimit = 0f;
+            currentHorizontalLimit = 0f;
+            Runtime.UpdateFrequency = UpdateFrequency.Update10;
+
+            IMyBlockGroup group = GridTerminalSystem.GetBlockGroupWithName("Drills");
+            group.GetBlocksOfType<IMyShipDrill>(drills);
+            if (drills == null) Echo($"Drills is null");
+            group = GridTerminalSystem.GetBlockGroupWithName("VerticalPistons");
+            group.GetBlocksOfType<IMyExtendedPistonBase>(verticalPistons);
+            if (verticalPistons == null) Echo($"Vertical pistons is null");
+            group = GridTerminalSystem.GetBlockGroupWithName("HorizontalPistons");
+            group.GetBlocksOfType<IMyExtendedPistonBase>(horizontalPistons);
+            if (horizontalPistons == null) Echo($"Horizontal pistons is null");
+            /*
+            drills = GridTerminalSystem.GetBlockGroupWithName("Drills") as List<IMyShipDrill>;
+            verticalPistons = GridTerminalSystem.GetBlockGroupWithName("VerticalPistons") as List<IMyExtendedPistonBase>;
+            horizontalPistons = GridTerminalSystem.GetBlockGroupWithName("HorizontalPistons") as List<IMyExtendedPistonBase>;
+            */
+
+
+            hinge = GridTerminalSystem.GetBlockWithName("Hinge") as IMyMotorAdvancedStator;
+            GridTerminalSystem.GetBlocksOfType<IMyCargoContainer>(containers);
+            surface = GridTerminalSystem.GetBlockWithName("MineLCD") as IMyTextSurface;
+            surface.ContentType = ContentType.SCRIPT;
+
+            foreach (IMyExtendedPistonBase piston in verticalPistons)
+            {
+                currentVerticalLimit += piston.CurrentPosition;
+                maxVerticalLimit += piston.MaxLimit;
+            }
+            foreach (IMyExtendedPistonBase piston in horizontalPistons)
+            {
+                currentHorizontalLimit += piston.CurrentPosition;
+                maxHorizontalLimit += piston.MaxLimit;
+            }
+        }
+
+        public void Save()
+        {
+            switch (direction)
+            {
+                case Directions.left:
+                    Storage = "left";
+                    break;
+                case Directions.right:
+                    Storage = "right";
+                    break;
+                case Directions.up:
+                    Storage = "up";
+                    break;
+                case Directions.down:
+                    Storage = "down";
+                    break;
+                case Directions.forward:
+                    Storage = "forward";
+                    break;
+                default:
+                    Storage = "backward";
+                    break;
+            }
+            Storage += "\n";
+            Storage += forwardDrilling ? "Forward" : "Backward";
+        }
+
+        public void Main(string argument, UpdateType updateSource)
+        {
+            if (argument == "Stop")
+            {
+                Echo("Экстренная остановка");
+                Disable();
+            }
+            if (argument == "Start")
+            {
+                Echo("Запуск...");
+                Enable();
+            }
+            if (enabled)
+            {
+                Mine();
+            }
+            UpdateLCD();
+        }
+
+        void Disable()
+        {
+            enabled = false;
+            foreach (IMyExtendedPistonBase piston in verticalPistons)
+            {
+                piston.Velocity = 0f;
+            }
+            foreach (IMyExtendedPistonBase piston in horizontalPistons)
+            {
+                piston.Velocity = 0f;
+            }
+            foreach (IMyShipDrill drill in drills)
+            {
+                drill.Enabled = false;
+            }
+            hinge.TargetVelocityRPM = 0f;
+            Save();
+        }
+
+        public void Load()
+        {
+            if (Storage != "")
+            {
+                string [] arguments = Storage.Split('\n');
+                direction = (Directions)Enum.Parse(typeof(Directions), arguments[0]);
+                if (arguments.Length > 1)
+                {
+                    forwardDrilling = arguments[1] == "Forward";
+                }
+            }
+            else
+            {
+                if (hinge.Angle < 0) direction = Directions.right;
+                else direction = Directions.left;
+            }
+        }
+
+        void Enable()
+        {
+            Init();
+            Load();
+        }
+
+        void Mine()
+        {
+            UpdateCargoCapacity();
+            debug = Storage != null ? $"Loaded storage: \n{Storage}\n~~~~~~~~\n" : "";
+            debug += $"~ {currentCapacity}/{maxCapacity} ~\n";
+
+            if (cargoIsFull())
+            {
+                Echo($"Cargo is full: {currentCapacity}/{maxCapacity}\n");
+                foreach (IMyCargoContainer container in containers)
+                {
+                    Echo($"{container.Name}: {container.GetInventory().CurrentVolume}/{container.GetInventory().MaxVolume}\n");
+                }
+                Disable();
+                return;
+            }
+
+            switch (direction)
+            {
+                case (Directions.left):
+                    debug += "Direction: Left\n";
+                    DrillLeft();
+                    break;
+                case (Directions.right):
+                    debug += "Direction: Right\n";
+                    DrillRight();
+                    break;
+                case (Directions.up):
+                    break;
+                case (Directions.down):
+                    debug += "Direction: Down\n";
+                    NextFloor();
+                    break;
+                case (Directions.forward):
+                    debug += "Direction: Forward\n";
+                    NextRadius();
+                    break;
+                case (Directions.backward):
+                    debug += "Direction: Backward\n";
+                    PreviousRadius();
+                    break;
+            }
+            debug += $"Forward: {forwardDrilling}\n";
+        }
+
+        void ChangeHorizontalLimit(float amount)
+        {
+            currentHorizontalLimit += amount;
+            if (currentHorizontalLimit < 0) currentHorizontalLimit = 0;
+            if (currentHorizontalLimit > maxHorizontalLimit) currentHorizontalLimit = maxHorizontalLimit;
+        }
+
+        void ChangeVerticalLimit(float amount)
+        {
+            currentVerticalLimit += amount;
+            if (currentVerticalLimit < 0) currentVerticalLimit = 0;
+            if (currentVerticalLimit > maxVerticalLimit) currentVerticalLimit = maxVerticalLimit;
+        }
+
+        void StopPistons()
+        {
+            foreach (IMyExtendedPistonBase piston in verticalPistons)
+            {
+                piston.Velocity = 0f;
+            }
+            foreach (IMyExtendedPistonBase piston in horizontalPistons)
+            {
+                piston.Velocity = 0f;
+            }
+        }
+
+        void EnableDrills(bool enable)
+        {
+            foreach (IMyShipDrill drill in drills)
+            {
+                drill.Enabled = enable;
+            }
+        }
+
+        float currentHorizontalPosition()
+        {
+            float pos = 0f;
+            foreach (IMyExtendedPistonBase piston in horizontalPistons)
+            {
+                pos += piston.CurrentPosition;
+            }
+            return pos;
+        }
+
+        float currentVerticalPosition()
+        {
+            float pos = 0f;
+            foreach (IMyExtendedPistonBase piston in verticalPistons)
+            {
+                pos += piston.CurrentPosition;
+            }
+            return pos;
+        }
+
+        void DrillRight()
+        {
+            StopPistons();
+            hinge.TargetVelocityRPM = HINGE_SPEED / (currentHorizontalPosition() + horizontalPistons.Count * 5) * PI;
+            EnableDrills(true);
+            if (hinge.Angle >= RIGHT_BORDER)
+            {
+                if ((currentHorizontalPosition() >= maxHorizontalLimit && forwardDrilling) || (currentHorizontalPosition() == 0 && !forwardDrilling))
+                {
+                    debug += "Change direction to down\n";
+                    direction = Directions.down;
+                    ChangeVerticalLimit(VERTICAL_STEP);
+                }
+                else
+                {
+                    if (forwardDrilling)
+                    {
+                        debug += "Change direction to forward\n";
+                        ChangeHorizontalLimit(HORIZONTAL_STEP);
+                        direction = Directions.forward;
+                    }
+                    if (!forwardDrilling)
+                    {
+                        debug += "Change direction to backward\n";
+                        ChangeHorizontalLimit(-HORIZONTAL_STEP);
+                        direction = Directions.backward;
+                    }
+                }
+            }
+        }
+
+        void DrillLeft()
+        {
+
+            StopPistons();
+            hinge.TargetVelocityRPM = -HINGE_SPEED / (currentHorizontalPosition() + horizontalPistons.Count * 5) * PI;
+            EnableDrills(true);
+            if (hinge.Angle <= LEFT_BORDER)
+            {
+                if ((currentHorizontalPosition() >= maxHorizontalLimit && forwardDrilling) || (currentHorizontalPosition() == 0 && !forwardDrilling))
+                {
+                    debug += "Change direction to down\n";
+                    direction = Directions.down;
+                    ChangeVerticalLimit(VERTICAL_STEP);
+                }
+                else
+                {
+                    if (forwardDrilling)
+                    {
+                        debug += "Change direction to forward\n";
+                        ChangeHorizontalLimit(HORIZONTAL_STEP);
+                        direction = Directions.forward;
+                    }
+                    if (!forwardDrilling)
+                    {
+                        debug += "Change direction to backward\n";
+                        ChangeHorizontalLimit(-HORIZONTAL_STEP);
+                        direction = Directions.backward;
+                    }
+                }
+            }
+        }
+
+        void NextFloor()
+        {
+            StopPistons();
+            foreach (IMyPistonBase piston in verticalPistons)
+            {
+                piston.Velocity = PISTON_SPEED / verticalPistons.Count;
+            }
+            hinge.TargetVelocityRPM = 0f;
+            EnableDrills(true);
+            if (currentVerticalPosition() >= currentVerticalLimit)
+            {
+                forwardDrilling = !forwardDrilling;
+                if (hinge.Angle >= RIGHT_BORDER)
+                {
+                    debug += "Change direction to left\n";
+                    direction = Directions.left;
+                }
+                else
+                {
+                    debug += "Change direction to right\n";
+                    direction = Directions.right;
+                }
+            }
+        }
+
+        void NextRadius()
+        {
+            StopPistons();
+            foreach (IMyPistonBase piston in horizontalPistons)
+            {
+                piston.Velocity = PISTON_SPEED / horizontalPistons.Count;
+            }
+            hinge.TargetVelocityRPM = 0f;
+            EnableDrills(true);
+            if (currentHorizontalPosition() >= currentHorizontalLimit || currentHorizontalPosition() == maxHorizontalLimit)
+            {
+                if (hinge.Angle >= RIGHT_BORDER)
+                {
+                    debug += "Change direction to left\n";
+                    direction = Directions.left;
+                }
+                else
+                {
+                    debug += "Change direction to right\n";
+                    direction = Directions.right;
+                }
+            }
+        }
+
+        void PreviousRadius()
+        {
+            StopPistons();
+            foreach (IMyPistonBase piston in horizontalPistons)
+            {
+                piston.Velocity = -PISTON_SPEED / horizontalPistons.Count;
+            }
+            hinge.TargetVelocityRPM = 0f;
+            EnableDrills(true);
+            if (currentHorizontalPosition() <= 0 || currentHorizontalPosition() <= currentHorizontalLimit)
+            {
+                if (hinge.Angle >= RIGHT_BORDER)
+                {
+                    debug += "Change direction to left\n";
+                    direction = Directions.left;
+                }
+                else
+                {
+                    debug += "Change direction to right\n";
+                    direction = Directions.right;
+                }
+            }
+        }
+
+        bool cargoIsFull() => (currentCapacity >= maxCapacity - 10);
+
+
+        void UpdateCargoCapacity()
+        {
+            currentCapacity = 0f;
+            maxCapacity = 0f;
+            foreach (IMyCargoContainer container in containers)
+            {
+                currentCapacity += (float)container.GetInventory().CurrentVolume;
+                maxCapacity += (float)container.GetInventory().MaxVolume;
+            }
+        }
+
+        void UpdateLCD()
+        {
+            debug += $"   Horizontal:\n";
+            debug += $"{currentHorizontalPosition()} / {currentHorizontalLimit}\n";
+            debug += $"   Vertical:\n";
+            debug += $"{currentVerticalPosition()} / {currentVerticalLimit}\n";
+            debug += $"   Hinge:\n";
+            debug += $"{Math.Round(hinge.Angle * 57.2958f, 2)}°\n";
+            using (var frame = surface.DrawFrame())
+            {
+                MySprite test = MySprite.CreateText(debug, "Debug", new Color(1f), 1f, TextAlignment.CENTER);
+                test.Position = new Vector2(250f, 0f);
+                frame.Add(test);
+            }
+        }
